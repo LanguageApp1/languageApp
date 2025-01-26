@@ -5,6 +5,10 @@ import { useRoute } from '@react-navigation/native';
 import { Audio } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { Buffer } from 'buffer';
+import {
+  createNewConversation,
+  addMessageToConversation,
+} from '../Services/conversationService';
 
 // Find your IP address using:
 // - Mac/Linux: ifconfig
@@ -21,6 +25,7 @@ export default function ChatScreen() {
   const [selectedChatFace, setSelectedChatFace] = useState([]);
   const [sound, setSound] = useState(null);
   const [playingMessageId, setPlayingMessageId] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
 
   useEffect(() => {
     setSelectedChatFace(param.selectedFace);
@@ -38,15 +43,76 @@ export default function ChatScreen() {
     ]);
   }, [param.selectedFace]);
 
-  const onSend = useCallback((messages = []) => {
-    setMessages((previousMessages) =>
-      GiftedChat.append(previousMessages, messages)
-    );
-    setLoading(true);
-    if (messages[0].text) {
-      getChatResponse(messages[0].text);
-    }
+  useEffect(() => {
+    // Create new conversation when screen loads
+    const initConversation = async () => {
+      try {
+        const id = await createNewConversation(
+          'anonymous', // Replace with actual userId when you add auth
+          `Chat with ${param.selectedFace.name}`
+        );
+        setConversationId(id);
+      } catch (error) {
+        console.error('Error initializing conversation:', error);
+      }
+    };
+
+    initConversation();
   }, []);
+
+  const onSend = useCallback(
+    async (messages = []) => {
+      setMessages((previousMessages) =>
+        GiftedChat.append(previousMessages, messages)
+      );
+
+      if (messages[0].text && conversationId) {
+        setLoading(true);
+        try {
+          // Save user message
+          await addMessageToConversation(conversationId, {
+            speaker: 'user',
+            message: messages[0].text,
+          });
+
+          // Get chat response
+          const response = await getChatResponse(messages[0].text);
+
+          // Create message object
+          const messageId = Math.random() * (9999999 - 1);
+          const chatAPIResp = {
+            _id: messageId,
+            text: response.response,
+            createdAt: new Date(),
+            user: {
+              _id: 2,
+              name: 'React Native',
+              avatar: selectedChatFace.image,
+            },
+          };
+
+          // Save bot response to Firebase
+          await addMessageToConversation(conversationId, {
+            speaker: 'response',
+            message: response.response,
+          });
+
+          // Update chat UI
+          setMessages((previousMessages) =>
+            GiftedChat.append(previousMessages, [chatAPIResp])
+          );
+
+          // Automatically play the response
+          playMessage(messageId, response.response);
+        } catch (error) {
+          console.error('Error in chat sequence:', error);
+        } finally {
+          setLoading(false);
+        }
+      }
+    },
+    [conversationId, selectedChatFace]
+  );
 
   const playMessage = async (messageId, text) => {
     try {
@@ -160,45 +226,10 @@ export default function ChatScreen() {
 
       const data = await response.json();
       console.log('Server response:', data);
-
-      if (data.response) {
-        const messageId = Math.random() * (9999999 - 1);
-        const chatAPIResp = {
-          _id: messageId,
-          text: data.response,
-          createdAt: new Date(),
-          user: {
-            _id: 2,
-            name: 'React Native',
-            avatar: selectedChatFace.image,
-          },
-        };
-        setLoading(false);
-        setMessages((previousMessages) =>
-          GiftedChat.append(previousMessages, chatAPIResp)
-        );
-
-        // Automatically play the response
-        playMessage(messageId, data.response);
-      } else {
-        throw new Error('No response from API');
-      }
+      return data;
     } catch (error) {
       console.error('Chat API Error:', error);
-      setLoading(false);
-      const errorMessage = {
-        _id: Math.random() * (9999999 - 1),
-        text: 'Sorry, there was an error processing your message. Please try again.',
-        createdAt: new Date(),
-        user: {
-          _id: 2,
-          name: 'React Native',
-          avatar: selectedChatFace.image,
-        },
-      };
-      setMessages((previousMessages) =>
-        GiftedChat.append(previousMessages, errorMessage)
-      );
+      throw error;
     }
   };
 
