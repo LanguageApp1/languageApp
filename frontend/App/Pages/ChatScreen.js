@@ -1,15 +1,26 @@
-import { StyleSheet, SafeAreaView } from 'react-native';
+import { StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
 import React, { useState, useCallback, useEffect } from 'react';
-import { GiftedChat } from 'react-native-gifted-chat';
+import { GiftedChat, Bubble } from 'react-native-gifted-chat';
 import { useRoute } from '@react-navigation/native';
+import { Audio } from 'expo-av';
+import { Ionicons } from '@expo/vector-icons';
+import { Buffer } from 'buffer';
 
-const API_URL = 'http://192.168.1.100:8000'; // Use your actual IP address
+// Find your IP address using:
+// - Mac/Linux: ifconfig
+// - Windows: ipconfig
+// Comment out other options and use your machine's IP
+const API_URL = 'http://10.0.0.150:8000'; // Your IP address is correct here
+// OR
+// const API_URL = 'http://YOUR_MACHINE_IP:8000';  // For physical devices
 
 export default function ChatScreen() {
   const param = useRoute().params;
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedChatFace, setSelectedChatFace] = useState([]);
+  const [sound, setSound] = useState(null);
+  const [playingMessageId, setPlayingMessageId] = useState(null);
 
   useEffect(() => {
     setSelectedChatFace(param.selectedFace);
@@ -37,15 +48,104 @@ export default function ChatScreen() {
     }
   }, []);
 
+  const playMessage = async (messageId, text) => {
+    try {
+      // Stop any currently playing message
+      if (sound) {
+        await sound.unloadAsync();
+      }
+
+      if (playingMessageId === messageId) {
+        setPlayingMessageId(null);
+        return;
+      }
+
+      const params = new URLSearchParams({
+        text: text,
+        provider: 'openai',
+        voice: 'alloy',
+      });
+
+      const response = await fetch(
+        `${API_URL}/text-to-speech?${params.toString()}`,
+        {
+          method: 'POST',
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to get audio');
+      }
+
+      // Get the audio data as base64
+      const audioData = await response.arrayBuffer();
+      const base64Audio = Buffer.from(audioData).toString('base64');
+      const audioUri = `data:audio/mpeg;base64,${base64Audio}`;
+
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: audioUri },
+        { shouldPlay: true }
+      );
+
+      setSound(newSound);
+      setPlayingMessageId(messageId);
+
+      // When audio finishes playing
+      newSound.setOnPlaybackStatusUpdate(async (status) => {
+        if (status.didJustFinish) {
+          setPlayingMessageId(null);
+          await newSound.unloadAsync();
+        }
+      });
+    } catch (error) {
+      console.error('Error playing message:', error);
+    }
+  };
+
+  const renderBubble = (props) => {
+    const message = props.currentMessage;
+    const isBot = message.user._id === 2;
+
+    return (
+      <Bubble
+        {...props}
+        wrapperStyle={{
+          right: {
+            backgroundColor: '#007AFF',
+          },
+          left: {
+            backgroundColor: '#E8E8E8',
+          },
+        }}
+        renderCustomView={() =>
+          isBot ? (
+            <TouchableOpacity
+              style={styles.playButton}
+              onPress={() => playMessage(message._id, message.text)}
+            >
+              <Ionicons
+                name={playingMessageId === message._id ? 'pause' : 'play'}
+                size={24}
+                color={isBot ? '#666' : '#007AFF'}
+              />
+            </TouchableOpacity>
+          ) : null
+        }
+      />
+    );
+  };
+
   const getChatResponse = async (prompt) => {
     try {
-      // Using URLSearchParams to properly encode parameters
       const params = new URLSearchParams({
         prompt: prompt,
         model: 'gpt-3.5-turbo',
       });
 
-      const response = await fetch(`${API_URL}/chat?${params.toString()}`, {
+      const url = `${API_URL}/chat?${params.toString()}`;
+      console.log('Attempting to fetch:', url);
+
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           Accept: 'application/json',
@@ -53,14 +153,18 @@ export default function ChatScreen() {
       });
 
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Server response:', response.status, errorText);
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
+      console.log('Server response:', data);
 
       if (data.response) {
+        const messageId = Math.random() * (9999999 - 1);
         const chatAPIResp = {
-          _id: Math.random() * (9999999 - 1),
+          _id: messageId,
           text: data.response,
           createdAt: new Date(),
           user: {
@@ -73,6 +177,9 @@ export default function ChatScreen() {
         setMessages((previousMessages) =>
           GiftedChat.append(previousMessages, chatAPIResp)
         );
+
+        // Automatically play the response
+        playMessage(messageId, data.response);
       } else {
         throw new Error('No response from API');
       }
@@ -95,6 +202,15 @@ export default function ChatScreen() {
     }
   };
 
+  // Clean up sound when component unmounts
+  useEffect(() => {
+    return sound
+      ? () => {
+          sound.unloadAsync();
+        }
+      : undefined;
+  }, [sound]);
+
   return (
     <SafeAreaView style={styles.chatView}>
       <GiftedChat
@@ -104,6 +220,7 @@ export default function ChatScreen() {
         user={{
           _id: 1,
         }}
+        renderBubble={renderBubble}
       />
     </SafeAreaView>
   );
@@ -115,5 +232,9 @@ const styles = StyleSheet.create({
     marginTop: 42,
     backgroundColor: '#fff',
     borderRadius: 10,
+  },
+  playButton: {
+    padding: 8,
+    alignSelf: 'flex-end',
   },
 });
